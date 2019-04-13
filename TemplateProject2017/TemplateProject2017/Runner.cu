@@ -53,8 +53,6 @@ unsigned int textureID;
 unsigned int viewportWidth = 1024;
 unsigned int viewportHeight = 1024;
 
-#pragma region CUDA Routines
-
 __global__ void applyFilter(const unsigned char someValue, const unsigned int pboWidth, const unsigned int pboHeight, unsigned char *pbo)
 {
 	//TODO 9: Create a filter that replaces Red spectrum of RGBA pbo such that RED=someValue 
@@ -65,9 +63,38 @@ __global__ void applyFilter(const unsigned char someValue, const unsigned int pb
 	int offset = ty * pboWidth * 4 + tx * 4;
 	uchar4 colorModel = tex2D(cudaTexRef, tx, ty);
 	pbo[offset + 0] = colorModel.x; //R
-	pbo[offset + 1] = colorModel.y + 1; //G
+	pbo[offset + 1] = colorModel.y; //G
 	pbo[offset + 2] = colorModel.z; //B
 	pbo[offset + 3] = colorModel.w; //A
+}
+
+void cudaWorker();
+void loadTexture(const char* imageFileName);
+void preparePBO();
+void my_display();
+void my_resize(GLsizei w, GLsizei h);
+void my_idle();
+void initGL(int argc, char **argv);
+void releaseOpenGL();
+void initCUDAtex();
+void releaseCUDA();
+void releaseResources();
+
+int main(int argc, char *argv[])
+{
+	initializeCUDA(deviceProp);
+
+	initGL(argc, argv);
+
+	loadTexture("heightmap.png");
+
+	preparePBO();
+
+	initCUDAtex();
+
+	//start rendering mainloop
+	glutMainLoop();
+	atexit(releaseResources);
 }
 
 void cudaWorker()
@@ -101,8 +128,6 @@ void cudaWorker()
 	ks.dimBlock = dim3(BLOCK_DIM, BLOCK_DIM, 1);
 	ks.dimGrid = dim3((imageWidth + BLOCK_DIM - 1) / BLOCK_DIM, (imageHeight + BLOCK_DIM - 1) / BLOCK_DIM, 1);
 
-
-
 	//Calling applyFileter kernel
 	someValue++;
 	if(someValue > 255) someValue = 0;
@@ -118,33 +143,6 @@ void cudaWorker()
 	glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, imageWidth, imageHeight, GL_RGBA, GL_UNSIGNED_BYTE, NULL);   //Source parameter is NULL, Data is coming from a PBO, not host memory
 }
 
-void initCUDAtex()
-{
-	cudaGLSetGLDevice(0);
-	checkError();
-
-	//CUDA Texture settings
-	cudaTexRef.normalized = false;						//Otherwise TRUE to access with normalized texture coordinates
-	cudaTexRef.filterMode = cudaFilterModePoint;		//Otherwise texRef.filterMode = cudaFilterModeLinear; for Linear interpolation of texels
-	cudaTexRef.addressMode[0] = cudaAddressModeClamp;	//No repeat texture pattern
-	cudaTexRef.addressMode[1] = cudaAddressModeClamp;	//No repeat texture pattern
-
-	//TODO 1: Register OpenGL texture to CUDA resource
-	cudaGraphicsGLRegisterImage(&cudaTexResource, textureID, GL_TEXTURE_2D, cudaGraphicsRegisterFlagsReadOnly);
-	checkError();
-
-	//TODO 2: Register PBO to CUDA resource
-	cudaGraphicsGLRegisterBuffer(&cudaPBOResource, pboID, cudaGraphicsRegisterFlagsWriteDiscard);
-	checkError();
-}
-
-void releaseCUDA()
-{
-	cudaGraphicsUnregisterResource(cudaPBOResource);
-	cudaGraphicsUnregisterResource(cudaTexResource);
-}
-#pragma endregion
-
 #pragma region OpenGL Routines - DO NOT MODIFY THIS SECTION !!!
 
 void loadTexture(const char* imageFileName)
@@ -156,6 +154,8 @@ void loadTexture(const char* imageFileName)
 	imageHeight = FreeImage_GetHeight(tmp);
 	imageBPP = FreeImage_GetBPP(tmp);
 	imagePitch = FreeImage_GetPitch(tmp);
+
+	tmp = FreeImage_ConvertTo32Bits(tmp);
 
 	//OpenGL Texture
 	glEnable(GL_TEXTURE_2D);
@@ -227,7 +227,6 @@ void my_idle()
 	glutPostRedisplay();
 }
 
-
 void initGL(int argc, char **argv)
 {
 	glutInit(&argc, argv);
@@ -261,25 +260,38 @@ void releaseOpenGL()
 
 #pragma endregion
 
+#pragma region CUDA Routines
+
+void initCUDAtex()
+{
+	cudaGLSetGLDevice(0);
+	checkError();
+
+	//CUDA Texture settings
+	cudaTexRef.normalized = false;						//Otherwise TRUE to access with normalized texture coordinates
+	cudaTexRef.filterMode = cudaFilterModePoint;		//Otherwise texRef.filterMode = cudaFilterModeLinear; for Linear interpolation of texels
+	cudaTexRef.addressMode[0] = cudaAddressModeClamp;	//No repeat texture pattern
+	cudaTexRef.addressMode[1] = cudaAddressModeClamp;	//No repeat texture pattern
+
+	//TODO 1: Register OpenGL texture to CUDA resource
+	cudaGraphicsGLRegisterImage(&cudaTexResource, textureID, GL_TEXTURE_2D, cudaGraphicsRegisterFlagsReadOnly);
+	checkError();
+
+	//TODO 2: Register PBO to CUDA resource
+	cudaGraphicsGLRegisterBuffer(&cudaPBOResource, pboID, cudaGraphicsRegisterFlagsWriteDiscard);
+	checkError();
+}
+
+void releaseCUDA()
+{
+	cudaGraphicsUnregisterResource(cudaPBOResource);
+	cudaGraphicsUnregisterResource(cudaTexResource);
+}
+
+#pragma endregion
+
 void releaseResources()
 {
 	releaseCUDA();
 	releaseOpenGL();
-}
-
-int main(int argc, char *argv[])
-{
-	initializeCUDA(deviceProp);
-
-	initGL(argc, argv);
-
-	loadTexture("lena.png");
-
-	preparePBO();
-
-	initCUDAtex();
-
-	//start rendering mainloop
-	glutMainLoop();
-	atexit(releaseResources);
 }
