@@ -60,8 +60,30 @@ constexpr unsigned int NUM_OF_RAIN_DROPS = 1 << 20;
 unsigned seed = std::chrono::system_clock::now().time_since_epoch().count();
 std::mt19937_64 generator(seed);
 
-bool* hRainDropDevPtr = nullptr;
-bool* dRainDropDevPtr = nullptr;
+struct RainDrop {
+private:
+	
+public:
+	RainDrop()
+		: posX(0), posY(0), isDrop(false) {}
+
+	void setPosition(const int posX, const int posY) {
+		this->posX = posX;
+		this->posY = posY;
+	}
+	void setDrop(const bool isDrop) {
+		this->isDrop = isDrop;
+	}
+
+	bool isDropOnPosition() { return this->isDrop; }
+
+	int posX, posY;
+	bool isDrop;
+};
+
+RainDrop* hRainDropDevPtr = nullptr;
+RainDrop* dRainDropDevPtr = nullptr;
+
 size_t pitch;
 
 void cudaWorker();
@@ -78,25 +100,25 @@ void releaseApplication();
 void releaseResources();
 void generateRandomDropsPosition(const unsigned int numOfDrops, const unsigned int width, const unsigned int height, const unsigned int depth);
 
-__global__ void applyDrops(const unsigned int pboWidth, const unsigned int pboHeight, unsigned char *pbo, bool* isDrop, const unsigned int pitch)
+__global__ void applyDrops(const unsigned int pboWidth, const unsigned int pboHeight, unsigned char *pbo, RainDrop* rainDrops, const unsigned int pitch)
 {
-	const unsigned int t_x = blockDim.x * blockIdx.x + threadIdx.x;
-	const unsigned int t_y = blockDim.y * blockIdx.y + threadIdx.y;
+	const unsigned int tx = blockDim.x * blockIdx.x + threadIdx.x;
+	const unsigned int ty = blockDim.y * blockIdx.y + threadIdx.y;
 
-	if(t_x >= pboWidth || t_y >= pboHeight) return;
+	if(tx >= pboWidth || ty >= pboHeight) return;
 
-	uchar4 tex = tex2D(cudaTexRef, t_x, t_y);
+	uchar4 tex = tex2D(cudaTexRef, tx, ty);
 
-	const unsigned int offset = (t_y * pboWidth + t_x) * 4;
+	const unsigned int offset = (ty * pboWidth + tx) * 4;
 	pbo[offset + 0] = tex.x; //R
 	pbo[offset + 1] = tex.y; //G
 	pbo[offset + 2] = tex.z; //B
 	pbo[offset + 3] = tex.w; //A
 
-	const unsigned int rainDropPitch = pitch / sizeof(bool);      //pitchInBytes/sizeof(float)
-	const unsigned int index = t_y * rainDropPitch + t_x;
+	const unsigned int rainDropPitch = pitch / sizeof(RainDrop);      //pitchInBytes/sizeof(float)
+	const unsigned int rainDropIndex = ty * rainDropPitch + tx;
 
-	if(isDrop[index]) { pbo[offset + 2] = 255; }
+	if(rainDrops[rainDropIndex].isDrop) { pbo[offset + 2] = 255; }
 }
 
 int main(int argc, char *argv[])
@@ -113,8 +135,8 @@ int main(int argc, char *argv[])
 
 	generateRandomDropsPosition(NUM_OF_RAIN_DROPS, imageWidth, imageHeight, 1);
 
-	checkCudaErrors(cudaMallocPitch((void**)&dRainDropDevPtr, &pitch, imageHeight * sizeof(bool), imageWidth));
-	checkCudaErrors(cudaMemcpy2D(dRainDropDevPtr, pitch, hRainDropDevPtr, imageHeight * sizeof(bool), imageHeight * sizeof(bool), imageWidth, cudaMemcpyHostToDevice));
+	checkCudaErrors(cudaMallocPitch((void**)&dRainDropDevPtr, &pitch, imageHeight * sizeof(RainDrop), imageWidth));
+	checkCudaErrors(cudaMemcpy2D(dRainDropDevPtr, pitch, hRainDropDevPtr, imageHeight * sizeof(RainDrop), imageHeight * sizeof(RainDrop), imageWidth, cudaMemcpyHostToDevice));
 
 	//start rendering mainloop
 	glutMainLoop();
@@ -125,21 +147,18 @@ void generateRandomDropsPosition(const unsigned int numOfDrops, const unsigned i
 	std::uniform_int_distribution<int> dis_x(0, width);
 	std::uniform_int_distribution<int> dis_y(0, height);
 	
-	hRainDropDevPtr = new bool[width * height];
-
-	for(unsigned int i = 0; i < width * height; i++)
-		hRainDropDevPtr[i] = false;
+	hRainDropDevPtr = new RainDrop[width * height];
 
 	for(unsigned int i = 0; i < numOfDrops; i++) {
 		int index = (dis_y(generator) * width) + dis_x(generator);
-
-		if (index < width * height)
-			hRainDropDevPtr[index] = true;
+		
+		if(index < width * height) 
+			hRainDropDevPtr[index].setDrop(true);	
 	}
 
 	/*for(unsigned int i = 0; i < width * height; i++) {
-		if (hRainDropDevPtr[i])
-			std::cout << i << " " << hRainDropDevPtr[i] << std::endl;
+		if (hStructure[i].isDrop)
+			std::cout << i << " " << hStructure[i].isDrop << std::endl;
 	}*/
 }
 
@@ -335,6 +354,7 @@ void releaseCUDA()
 #pragma endregion
 
 void releaseApplication() {
+	delete[] hRainDropDevPtr;
 	delete[] dRainDropDevPtr;
 }
 
