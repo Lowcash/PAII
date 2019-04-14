@@ -2,6 +2,8 @@
 #include <stdio.h>
 #include <string.h>
 #include <math.h>
+#include <chrono>
+#include <random>
 
 #ifdef _WIN32
 #  define WINDOWS_LEAN_AND_MEAN
@@ -44,7 +46,6 @@ cudaGraphicsResource_t cudaTexResource;
 texture<uchar4, 2, cudaReadModeElementType> cudaTexRef;
 cudaChannelFormatDesc cudaTexChannelDesc;
 KernelSetting ks;
-unsigned char someValue = 0;
 
 //OpenGL
 unsigned int pboID;
@@ -53,20 +54,15 @@ unsigned int textureID;
 unsigned int viewportWidth = 1024;
 unsigned int viewportHeight = 1024;
 
-__global__ void applyFilter(const unsigned char someValue, const unsigned int pboWidth, const unsigned int pboHeight, unsigned char *pbo)
-{
-	//TODO 9: Create a filter that replaces Red spectrum of RGBA pbo such that RED=someValue 
-	unsigned int tx = blockIdx.x * blockDim.x + threadIdx.x;
-	unsigned int ty = blockIdx.y * blockDim.y + threadIdx.y;
+//Application
+constexpr unsigned int NUM_OF_RAIN_DROPS = 1 << 20;
 
-	if(tx >= pboWidth || ty >= pboHeight) return;
-	int offset = ty * pboWidth * 4 + tx * 4;
-	uchar4 colorModel = tex2D(cudaTexRef, tx, ty);
-	pbo[offset + 0] = colorModel.x; //R
-	pbo[offset + 1] = colorModel.y; //G
-	pbo[offset + 2] = colorModel.z; //B
-	pbo[offset + 3] = colorModel.w; //A
-}
+unsigned seed = std::chrono::system_clock::now().time_since_epoch().count();
+std::mt19937_64 generator(seed);
+
+bool* hRainDropDevPtr = nullptr;
+bool* dRainDropDevPtr = nullptr;
+size_t pitch;
 
 void cudaWorker();
 void loadTexture(const char* imageFileName);
@@ -78,7 +74,30 @@ void initGL(int argc, char **argv);
 void releaseOpenGL();
 void initCUDAtex();
 void releaseCUDA();
+void releaseApplication();
 void releaseResources();
+void generateRandomDropsPosition(const unsigned int numOfDrops, const unsigned int width, const unsigned int height, const unsigned int depth);
+
+__global__ void applyDrops(const unsigned int pboWidth, const unsigned int pboHeight, unsigned char *pbo, bool* isDrop, const unsigned int pitch)
+{
+	const unsigned int t_x = blockDim.x * blockIdx.x + threadIdx.x;
+	const unsigned int t_y = blockDim.y * blockIdx.y + threadIdx.y;
+
+	if(t_x >= pboWidth || t_y >= pboHeight) return;
+
+	uchar4 tex = tex2D(cudaTexRef, t_x, t_y);
+
+	const unsigned int offset = (t_y * pboWidth + t_x) * 4;
+	pbo[offset + 0] = tex.x; //R
+	pbo[offset + 1] = tex.y; //G
+	pbo[offset + 2] = tex.z; //B
+	pbo[offset + 3] = tex.w; //A
+
+	const unsigned int rainDropPitch = pitch / sizeof(bool);      //pitchInBytes/sizeof(float)
+	const unsigned int index = t_y * rainDropPitch + t_x;
+
+	if(isDrop[index]) { pbo[offset + 2] = 255; }
+}
 
 int main(int argc, char *argv[])
 {
@@ -92,9 +111,36 @@ int main(int argc, char *argv[])
 
 	initCUDAtex();
 
+	generateRandomDropsPosition(NUM_OF_RAIN_DROPS, imageWidth, imageHeight, 1);
+
+	checkCudaErrors(cudaMallocPitch((void**)&dRainDropDevPtr, &pitch, imageHeight * sizeof(bool), imageWidth));
+	checkCudaErrors(cudaMemcpy2D(dRainDropDevPtr, pitch, hRainDropDevPtr, imageHeight * sizeof(bool), imageHeight * sizeof(bool), imageWidth, cudaMemcpyHostToDevice));
+
 	//start rendering mainloop
 	glutMainLoop();
 	atexit(releaseResources);
+}
+
+void generateRandomDropsPosition(const unsigned int numOfDrops, const unsigned int width, const unsigned int height, const unsigned int depth) {
+	std::uniform_int_distribution<int> dis_x(0, width);
+	std::uniform_int_distribution<int> dis_y(0, height);
+	
+	hRainDropDevPtr = new bool[width * height];
+
+	for(unsigned int i = 0; i < width * height; i++)
+		hRainDropDevPtr[i] = false;
+
+	for(unsigned int i = 0; i < numOfDrops; i++) {
+		int index = (dis_y(generator) * width) + dis_x(generator);
+
+		if (index < width * height)
+			hRainDropDevPtr[index] = true;
+	}
+
+	/*for(unsigned int i = 0; i < width * height; i++) {
+		if (hRainDropDevPtr[i])
+			std::cout << i << " " << hRainDropDevPtr[i] << std::endl;
+	}*/
 }
 
 void cudaWorker()
@@ -129,9 +175,7 @@ void cudaWorker()
 	ks.dimGrid = dim3((imageWidth + BLOCK_DIM - 1) / BLOCK_DIM, (imageHeight + BLOCK_DIM - 1) / BLOCK_DIM, 1);
 
 	//Calling applyFileter kernel
-	someValue++;
-	if(someValue > 255) someValue = 0;
-	applyFilter << <ks.dimGrid, ks.dimBlock >> > (someValue, imageWidth, imageHeight, pboData);
+	applyDrops << <ks.dimGrid, ks.dimBlock >> > (imageWidth, imageHeight, pboData, dRainDropDevPtr, pitch);
 
 	//Following code release mapped resources, unbinds texture and ensures that PBO data will be coppied into OpenGL texture. Do not modify following code!
 	cudaUnbindTexture(&cudaTexRef);
@@ -290,8 +334,13 @@ void releaseCUDA()
 
 #pragma endregion
 
+void releaseApplication() {
+	delete[] dRainDropDevPtr;
+}
+
 void releaseResources()
 {
 	releaseCUDA();
 	releaseOpenGL();
+	releaseApplication();
 }
