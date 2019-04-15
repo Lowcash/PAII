@@ -20,6 +20,7 @@
 // includes, cuda
 #include <cuda_runtime.h>
 #include <cuda_gl_interop.h>
+#include <math_functions.h>
 
 // Utilities and timing functions
 #include <helper_functions.h>    // includes cuda.h and cuda_runtime_api.h
@@ -62,14 +63,14 @@ std::mt19937_64 generator(seed);
 
 struct RainDrop {
 private:
-	
+
 public:
 	RainDrop()
-		: posX(0), posY(0), isDrop(false) {}
+		: gridPosition(int2()), exactPosition(double2()), directionForce(double2()), isDrop(false) {}
 
 	void setPosition(const int posX, const int posY) {
-		this->posX = posX;
-		this->posY = posY;
+		this->gridPosition = make_int2(posX, posY);
+		this->exactPosition = make_double2(posX, posY);
 	}
 	void setDrop(const bool isDrop) {
 		this->isDrop = isDrop;
@@ -77,7 +78,9 @@ public:
 
 	bool isDropOnPosition() { return this->isDrop; }
 
-	int posX, posY;
+	int2 gridPosition;
+	double2 exactPosition;
+	double2 directionForce;
 	bool isDrop;
 };
 
@@ -98,6 +101,7 @@ void initCUDAtex();
 void releaseCUDA();
 void releaseApplication();
 void releaseResources();
+void assignRainDrops();
 void generateRandomDropsPosition(const unsigned int numOfDrops, const unsigned int width, const unsigned int height, const unsigned int depth);
 
 __global__ void applyDrops(const unsigned int pboWidth, const unsigned int pboHeight, unsigned char *pbo, RainDrop* rainDrops, const unsigned int pitch)
@@ -109,16 +113,82 @@ __global__ void applyDrops(const unsigned int pboWidth, const unsigned int pboHe
 
 	uchar4 tex = tex2D(cudaTexRef, tx, ty);
 
-	const unsigned int offset = (ty * pboWidth + tx) * 4;
-	pbo[offset + 0] = tex.x; //R
-	pbo[offset + 1] = tex.y; //G
-	pbo[offset + 2] = tex.z; //B
-	pbo[offset + 3] = tex.w; //A
+	const unsigned int texOffset = (ty * pboWidth + tx) * 4;
+	pbo[texOffset + 0] = tex.x; 
+	pbo[texOffset + 1] = tex.y; 
+	pbo[texOffset + 2] = tex.z; 
+	pbo[texOffset + 3] = tex.w;
+	/*pbo[texOffset + 0] = 0; 
+	pbo[texOffset + 1] = 0; 
+	pbo[texOffset + 2] = 0; 
+	pbo[texOffset + 3] = 0;*/
 
 	const unsigned int rainDropPitch = pitch / sizeof(RainDrop);      //pitchInBytes/sizeof(float)
-	const unsigned int rainDropIndex = ty * rainDropPitch + tx;
+	const unsigned int rainDropOffset = ty * rainDropPitch + tx;
 
-	if(rainDrops[rainDropIndex].isDrop) { pbo[offset + 2] = 255; }
+	int checkOffset = 10;
+
+	const float lt = tex2D(cudaTexRef, tx - (1 * checkOffset), ty - (1 * checkOffset)).x;
+	const float lc = tex2D(cudaTexRef, tx - (1 * checkOffset), ty + (0 * checkOffset)).x;
+	const float lb = tex2D(cudaTexRef, tx - (1 * checkOffset), ty + (1 * checkOffset)).x;
+	const float ct = tex2D(cudaTexRef, tx + (0 * checkOffset), ty - (1 * checkOffset)).x;
+	const float cb = tex2D(cudaTexRef, tx + (0 * checkOffset), ty + (1 * checkOffset)).x;
+	const float rt = tex2D(cudaTexRef, tx + (1 * checkOffset), ty - (1 * checkOffset)).x;
+	const float rc = tex2D(cudaTexRef, tx + (1 * checkOffset), ty + (0 * checkOffset)).x;
+	const float rb = tex2D(cudaTexRef, tx + (1 * checkOffset), ty + (1 * checkOffset)).x;
+
+	int direction = 0;
+
+	if(lt < tex.x) { direction = 1; tex.x = lt; }
+	if(lc < tex.x) { direction = 2; tex.x = lc; }
+	if(lb < tex.x) { direction = 3; tex.x = lb; }
+	if(ct < tex.x) { direction = 4; tex.x = ct; }
+	if(cb < tex.x) { direction = 5; tex.x = cb; }
+	if(rt < tex.x) { direction = 6; tex.x = rt; }
+	if(rc < tex.x) { direction = 7; tex.x = rc; }
+	if(rb < tex.x) { direction = 8; tex.x = rb; }
+
+	double2 forceTo = make_double2(0, 0);
+
+	if(direction == 1) { forceTo = make_double2(-1, -1); }
+	if(direction == 2) { forceTo = make_double2(-1,  0); }
+	if(direction == 3) { forceTo = make_double2(-1,  1); }
+	if(direction == 4) { forceTo = make_double2( 0, -1); }
+	if(direction == 5) { forceTo = make_double2( 0,  1); }
+	if(direction == 6) { forceTo = make_double2( 1, -1); }
+	if(direction == 7) { forceTo = make_double2( 1,  0); }
+	if(direction == 8) { forceTo = make_double2( 1,  1); }
+
+	if(rainDrops[rainDropOffset].isDrop && direction != 0) {
+		rainDrops[rainDropOffset].directionForce = make_double2(
+			rainDrops[rainDropOffset].directionForce.x + forceTo.x * 1,
+			rainDrops[rainDropOffset].directionForce.y + forceTo.y * 1
+		);
+
+		rainDrops[rainDropOffset].exactPosition = make_double2(
+			rainDrops[rainDropOffset].exactPosition.x + rainDrops[rainDropOffset].directionForce.x,
+			rainDrops[rainDropOffset].exactPosition.y + rainDrops[rainDropOffset].directionForce.y);
+		
+		if((int)rainDrops[rainDropOffset].exactPosition.x != rainDrops[rainDropOffset].gridPosition.x ||
+			(int)rainDrops[rainDropOffset].exactPosition.y != rainDrops[rainDropOffset].gridPosition.y) {
+			
+			const int directionX = (int)rainDrops[rainDropOffset].exactPosition.x - rainDrops[rainDropOffset].gridPosition.x;
+			const int directionY = (int)rainDrops[rainDropOffset].exactPosition.y - rainDrops[rainDropOffset].gridPosition.y;
+
+			rainDrops[rainDropOffset].exactPosition = make_double2(rainDrops[rainDropOffset].gridPosition.x, rainDrops[rainDropOffset].gridPosition.y);
+			//rainDrops[rainDropOffset].isDrop = false;
+
+			const unsigned int newRainDropIndex = ((ty + directionY) * rainDropPitch) + tx + directionX;
+			
+			if(newRainDropIndex > 0 && newRainDropIndex < pboHeight * pboWidth) {
+				rainDrops[rainDropOffset].isDrop = false;
+
+				//rainDrops[newRainDropIndex].isDrop = true;
+			}
+		}
+	}
+
+	if(rainDrops[rainDropOffset].isDrop) { pbo[texOffset + 2] = 255; }
 }
 
 int main(int argc, char *argv[])
@@ -128,6 +198,7 @@ int main(int argc, char *argv[])
 	initGL(argc, argv);
 
 	loadTexture("heightmap.png");
+	//loadTexture("gradient.gif");
 
 	preparePBO();
 
@@ -135,30 +206,39 @@ int main(int argc, char *argv[])
 
 	generateRandomDropsPosition(NUM_OF_RAIN_DROPS, imageWidth, imageHeight, 1);
 
-	checkCudaErrors(cudaMallocPitch((void**)&dRainDropDevPtr, &pitch, imageHeight * sizeof(RainDrop), imageWidth));
-	checkCudaErrors(cudaMemcpy2D(dRainDropDevPtr, pitch, hRainDropDevPtr, imageHeight * sizeof(RainDrop), imageHeight * sizeof(RainDrop), imageWidth, cudaMemcpyHostToDevice));
+	assignRainDrops();
 
 	//start rendering mainloop
 	glutMainLoop();
 	atexit(releaseResources);
 }
 
+void assignRainDrops() {
+	checkCudaErrors(cudaMallocPitch((void**)&dRainDropDevPtr, &pitch, imageHeight * sizeof(RainDrop), imageWidth));
+	checkCudaErrors(cudaMemcpy2D(dRainDropDevPtr, pitch, hRainDropDevPtr, imageHeight * sizeof(RainDrop), imageHeight * sizeof(RainDrop), imageWidth, cudaMemcpyHostToDevice));
+}
+
 void generateRandomDropsPosition(const unsigned int numOfDrops, const unsigned int width, const unsigned int height, const unsigned int depth) {
 	std::uniform_int_distribution<int> dis_x(0, width);
 	std::uniform_int_distribution<int> dis_y(0, height);
-	
+
 	hRainDropDevPtr = new RainDrop[width * height];
+
+	for(unsigned int row = 0, iterator = 0; row < height; row++) {
+		for(unsigned int col = 0; col < width; col++, iterator++)
+			hRainDropDevPtr[iterator].setPosition(row, col);
+	}
 
 	for(unsigned int i = 0; i < numOfDrops; i++) {
 		int index = (dis_y(generator) * width) + dis_x(generator);
-		
-		if(index < width * height) 
-			hRainDropDevPtr[index].setDrop(true);	
+
+		if(index < width * height)
+			hRainDropDevPtr[index].setDrop(true);
 	}
 
 	/*for(unsigned int i = 0; i < width * height; i++) {
-		if (hStructure[i].isDrop)
-			std::cout << i << " " << hStructure[i].isDrop << std::endl;
+		//if (hRainDropDevPtr[i].isDrop)
+			std::cout << hRainDropDevPtr[i].exactPosition.x << " " << hRainDropDevPtr[i].exactPosition.y << std::endl;
 	}*/
 }
 
