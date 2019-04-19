@@ -63,30 +63,7 @@ bool isGradientCalculated = false;
 unsigned seed = std::chrono::system_clock::now().time_since_epoch().count();
 std::mt19937_64 generator(seed);
 
-struct RainDrop {
-private:
-
-public:
-	RainDrop()
-		: gridPosition(int2()), exactPosition(double2()), directionForce(double2()), isDrop(false) {}
-
-	void setPosition(const int posX, const int posY) {
-		this->gridPosition = make_int2(posX, posY);
-		this->exactPosition = make_double2(posX, posY);
-	}
-	void setDrop(const bool isDrop) {
-		this->isDrop = isDrop;
-	}
-
-	bool isDropOnPosition() { return this->isDrop; }
-
-	int2 gridPosition;
-	double2 exactPosition;
-	double2 directionForce;
-	bool isDrop;
-};
-
-struct RainBuffer {
+typedef struct RainBuffer {
 	RainBuffer()
 		: actualDropState(0), promiseDropState(0), directionForce(int2()) {}
 
@@ -100,9 +77,6 @@ struct RainBuffer {
 	float actualDropState;
 	float promiseDropState;
 };
-
-RainDrop* hRainDropDevPtr = nullptr;
-RainDrop* dRainDropDevPtr = nullptr;
 
 RainBuffer* hRainBufferDevPtr = nullptr;
 RainBuffer* dRainBufferDevPtr = nullptr;
@@ -167,7 +141,7 @@ __global__ void calculateGradients(const unsigned int pboWidth, const unsigned i
 	if(direction == 8) { rainBuffer[rainBufferOffset].directionForce = make_int2( 1,  1); }
 }
 
-__global__ void moveRainDrops(const unsigned int pboWidth, const unsigned int pboHeight, unsigned char *pbo, RainBuffer* rainBuffer, const unsigned int pitch) {
+__global__ void moveRainDrops(const unsigned int pboWidth, const unsigned int pboHeight, RainBuffer* rainBuffer, const unsigned int pitch) {
 	const unsigned int tx = blockDim.x * blockIdx.x + threadIdx.x;
 	const unsigned int ty = blockDim.y * blockIdx.y + threadIdx.y;
 
@@ -180,10 +154,10 @@ __global__ void moveRainDrops(const unsigned int pboWidth, const unsigned int pb
 
 	const unsigned int flowTo = (ty + directionForce.y) * rainBufferPitch + (tx + directionForce.x);
 
-	if(flowTo > 0 && flowTo < pboWidth * pboHeight) { 
-		rainBuffer[flowTo].promiseDropState += rainBuffer[rainBufferOffset].actualDropState * 0.025;
+	if(flowTo > 0 && flowTo < pboWidth * pboHeight * sizeof(RainBuffer)) {
+		rainBuffer[flowTo].promiseDropState += rainBuffer[rainBufferOffset].actualDropState * 0.01;
 
-		rainBuffer[rainBufferOffset].promiseDropState -= rainBuffer[rainBufferOffset].actualDropState * 0.025;
+		rainBuffer[rainBufferOffset].promiseDropState -= rainBuffer[rainBufferOffset].actualDropState * 0.01;
 
 		rainBuffer[rainBufferOffset].promiseDropState = max(rainBuffer[rainBufferOffset].promiseDropState, 0.0);
 	}
@@ -206,8 +180,8 @@ __global__ void vizualizeRainDrops(const unsigned int pboWidth, const unsigned i
 
 	rainBuffer[rainBufferOffset].actualDropState = rainBuffer[rainBufferOffset].promiseDropState;
 
-	//pbo[texOffset + 2] = max((int)rainBuffer[rainBufferOffset].actualDropState, pbo[texOffset + 2]);
-	if(rainBuffer[rainBufferOffset].actualDropState > 0) { pbo[texOffset + 2] = rainBuffer[rainBufferOffset].actualDropState; }
+	pbo[texOffset + 2] = min(max((int)rainBuffer[rainBufferOffset].actualDropState, pbo[texOffset + 2]), 255);
+	//if(rainBuffer[rainBufferOffset].actualDropState > 0) { pbo[texOffset + 2] = rainBuffer[rainBufferOffset].actualDropState; }
 }
 
 int main(int argc, char *argv[])
@@ -247,7 +221,7 @@ void generateRandomDropsPosition(RainBuffer* rainBuffer, const unsigned int numO
 		int index = (dis_y(generator) * width) + dis_x(generator);
 
 		if(index < width * height)
-			rainBuffer[index].addDropsToState(30);
+			rainBuffer[index].addDropsToState(50);
 	}
 }
 
@@ -289,7 +263,7 @@ void cudaWorker()
 		isGradientCalculated = true;
 	}
 
-	moveRainDrops << <ks.dimGrid, ks.dimBlock >> > (imageWidth, imageHeight, pboData, dRainBufferDevPtr, pitch);
+	moveRainDrops << <ks.dimGrid, ks.dimBlock >> > (imageWidth, imageHeight, dRainBufferDevPtr, pitch);
 	vizualizeRainDrops << <ks.dimGrid, ks.dimBlock >> > (imageWidth, imageHeight, pboData, dRainBufferDevPtr, pitch);
 
 	//Following code release mapped resources, unbinds texture and ensures that PBO data will be coppied into OpenGL texture. Do not modify following code!
