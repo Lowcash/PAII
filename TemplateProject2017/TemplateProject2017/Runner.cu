@@ -56,7 +56,14 @@ unsigned int viewportWidth = 1024;
 unsigned int viewportHeight = 1024;
 
 //Application
-constexpr unsigned int NUM_OF_RAIN_DROPS = 1 << 20;
+
+//---------------------Settings---------------------//
+constexpr unsigned int NUM_OF_RAIN_DROPS = 1 << 8;
+constexpr unsigned int RAIN_DROP_POWER = 100;
+constexpr unsigned int RAIN_INTERVAL = 2;
+
+//--------------------------------------------------//
+unsigned int updateIteration = 0;
 
 bool isGradientCalculated = false;
 
@@ -95,6 +102,8 @@ void initCUDAtex();
 void releaseCUDA();
 void releaseApplication();
 void releaseResources();
+void initRainBuffer();
+void rain();
 void assignRainBuffer();
 void generateRandomDropsPosition(RainBuffer* rainBuffer, const unsigned int numOfDrops, const unsigned int width, const unsigned int height, const unsigned int depth);
 
@@ -150,7 +159,7 @@ __global__ void moveRainDrops(const unsigned int pboWidth, const unsigned int pb
 	const unsigned int rainBufferPitch = pitch / sizeof(RainBuffer);
 	const unsigned int rainBufferOffset = ty * rainBufferPitch + tx;
 
-	int2 directionForce = rainBuffer[rainBufferOffset].directionForce;
+	const int2 directionForce = rainBuffer[rainBufferOffset].directionForce;
 
 	const unsigned int flowTo = (ty + directionForce.y) * rainBufferPitch + (tx + directionForce.x);
 
@@ -169,18 +178,19 @@ __global__ void vizualizeRainDrops(const unsigned int pboWidth, const unsigned i
 
 	if(tx >= pboWidth || ty >= pboHeight) { return; }
 
-	uchar4 tex = tex2D(cudaTexRef, tx, ty);
+	const uchar4 tex = tex2D(cudaTexRef, tx, ty);
 
 	const unsigned int texOffset = (ty * pboWidth + tx) * 4;
-	//pbo[texOffset + 0] = tex.x; pbo[texOffset + 1] = tex.y; pbo[texOffset + 2] = tex.z; pbo[texOffset + 3] = tex.w;
-	pbo[texOffset + 0] = 0; pbo[texOffset + 1] = 0; pbo[texOffset + 2] = 0; pbo[texOffset + 3] = 0;
+	pbo[texOffset + 0] = tex.x; pbo[texOffset + 1] = tex.y; pbo[texOffset + 2] = tex.z; pbo[texOffset + 3] = tex.w;
+	//pbo[texOffset + 0] = 0; pbo[texOffset + 1] = 0; pbo[texOffset + 2] = 0; pbo[texOffset + 3] = 0;
 
 	const unsigned int rainBufferPitch = pitch / sizeof(RainBuffer);
 	const unsigned int rainBufferOffset = ty * rainBufferPitch + tx;
 
 	rainBuffer[rainBufferOffset].actualDropState = rainBuffer[rainBufferOffset].promiseDropState;
 
-	pbo[texOffset + 2] = min(max((int)rainBuffer[rainBufferOffset].actualDropState, pbo[texOffset + 2]), 255);
+	pbo[texOffset + 1] = min(max((int)rainBuffer[rainBufferOffset].actualDropState, pbo[texOffset + 1]), 255);
+	pbo[texOffset + 0] = min(max((int)rainBuffer[rainBufferOffset].actualDropState, pbo[texOffset + 0]), 255);
 	//if(rainBuffer[rainBufferOffset].actualDropState > 0) { pbo[texOffset + 2] = rainBuffer[rainBufferOffset].actualDropState; }
 }
 
@@ -197,15 +207,25 @@ int main(int argc, char *argv[])
 
 	initCUDAtex();
 
-	hRainBufferDevPtr = new RainBuffer[imageWidth * imageHeight];
-
-	generateRandomDropsPosition(hRainBufferDevPtr, NUM_OF_RAIN_DROPS, imageWidth, imageHeight, 1);
+	initRainBuffer();
 
 	assignRainBuffer();
 
 	//start rendering mainloop
 	glutMainLoop();
 	atexit(releaseResources);
+}
+
+void rain() {
+	checkCudaErrors(cudaMemcpy2D(hRainBufferDevPtr, imageHeight * sizeof(RainBuffer), dRainBufferDevPtr, pitch, imageHeight * sizeof(RainBuffer), imageWidth, cudaMemcpyDeviceToHost));
+
+	generateRandomDropsPosition(hRainBufferDevPtr, NUM_OF_RAIN_DROPS, imageWidth, imageHeight, 1);
+
+	checkCudaErrors(cudaMemcpy2D(dRainBufferDevPtr, pitch, hRainBufferDevPtr, imageHeight * sizeof(RainBuffer), imageHeight * sizeof(RainBuffer), imageWidth, cudaMemcpyHostToDevice));
+}
+
+void initRainBuffer() {
+	hRainBufferDevPtr = new RainBuffer[imageWidth * imageHeight];
 }
 
 void assignRainBuffer() {
@@ -221,7 +241,7 @@ void generateRandomDropsPosition(RainBuffer* rainBuffer, const unsigned int numO
 		int index = (dis_y(generator) * width) + dis_x(generator);
 
 		if(index < width * height)
-			rainBuffer[index].addDropsToState(50);
+			rainBuffer[index].addDropsToState(RAIN_DROP_POWER);
 	}
 }
 
@@ -256,6 +276,9 @@ void cudaWorker()
 	ks.dimBlock = dim3(BLOCK_DIM, BLOCK_DIM, 1);
 	ks.dimGrid = dim3((imageWidth + BLOCK_DIM - 1) / BLOCK_DIM, (imageHeight + BLOCK_DIM - 1) / BLOCK_DIM, 1);
 
+	// Rain in interval
+	if(updateIteration % RAIN_INTERVAL == 0) { rain(); }
+
 	//Calling kernels
 	if(!isGradientCalculated) {
 		calculateGradients << <ks.dimGrid, ks.dimBlock >> > (imageWidth, imageHeight, pboData, dRainBufferDevPtr, pitch);
@@ -274,6 +297,8 @@ void cudaWorker()
 	glBindBuffer(GL_PIXEL_UNPACK_BUFFER, pboID);
 	glBindTexture(GL_TEXTURE_2D, textureID);
 	glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, imageWidth, imageHeight, GL_RGBA, GL_UNSIGNED_BYTE, NULL);   //Source parameter is NULL, Data is coming from a PBO, not host memory
+
+	updateIteration++;
 }
 
 #pragma region OpenGL Routines - DO NOT MODIFY THIS SECTION !!!
