@@ -18,6 +18,8 @@
 #include <imageManager.h>
 
 // includes, cuda
+#include <curand.h>
+#include <curand_kernel.h>
 #include <cuda_runtime.h>
 #include <cuda_gl_interop.h>
 #include <math_functions.h>
@@ -25,6 +27,7 @@
 // Utilities and timing functions
 #include <helper_functions.h>    // includes cuda.h and cuda_runtime_api.h
 #include <timer.h>               // timing functions
+#include <math.h>
 
 // CUDA helper functions
 #include <helper_cuda.h>         // helper functions for CUDA error check
@@ -58,10 +61,25 @@ unsigned int viewportHeight = 1024;
 //Application
 
 //---------------------Settings---------------------//
-constexpr unsigned int NUM_OF_RAIN_DROPS = 1 << 8;
+constexpr unsigned int NUM_OF_RAIN_DROPS = 1 << 10;
 constexpr unsigned int RAIN_DROP_POWER = 100;
-constexpr unsigned int RAIN_INTERVAL = 2;
+constexpr unsigned int RAIN_INTERVAL = 1;
+constexpr unsigned int DROP_PERCENTAGE_MOVEMENT_AVAILABILITY = 1;
 
+constexpr unsigned int GRADIENT_CHECK_DISTANCE = 1;
+
+constexpr bool USE_RED = true;
+constexpr bool USE_GREEN = true;
+constexpr bool USE_BLUE = false;
+constexpr bool USE_BACKGROUND_TEX = false;
+
+enum GenerateRainOn { CPU, GPU };
+
+constexpr GenerateRainOn generateRainOn = GenerateRainOn::GPU;
+
+//const std::string BACKGROUND_TEX_PATH = "lena.png";
+//const std::string BACKGROUND_TEX_PATH = "lena_small.png";
+const std::string BACKGROUND_TEX_PATH = "heightmap.png";
 //--------------------------------------------------//
 unsigned int updateIteration = 0;
 
@@ -88,6 +106,8 @@ typedef struct RainBuffer {
 RainBuffer* hRainBufferDevPtr = nullptr;
 RainBuffer* dRainBufferDevPtr = nullptr;
 
+curandState *d_state = nullptr;
+
 size_t pitch;
 
 void cudaWorker();
@@ -105,9 +125,9 @@ void releaseResources();
 void initRainBuffer();
 void rain();
 void assignRainBuffer();
-void generateRandomDropsPosition(RainBuffer* rainBuffer, const unsigned int numOfDrops, const unsigned int width, const unsigned int height, const unsigned int depth);
+void generateRandomDropsPosition(RainBuffer* rainBuffer, const unsigned int numOfDrops, const unsigned int width, const unsigned int height);
 
-__global__ void calculateGradients(const unsigned int pboWidth, const unsigned int pboHeight, unsigned char *pbo, RainBuffer* rainBuffer, const unsigned int pitch) {
+template<unsigned int gradientCheckDistance> __global__ void calculateGradients(const unsigned int pboWidth, const unsigned int pboHeight, unsigned char *pbo, RainBuffer* rainBuffer, const unsigned int pitch) {
 	const unsigned int tx = blockDim.x * blockIdx.x + threadIdx.x;
 	const unsigned int ty = blockDim.y * blockIdx.y + threadIdx.y;
 
@@ -118,16 +138,14 @@ __global__ void calculateGradients(const unsigned int pboWidth, const unsigned i
 	const unsigned int rainBufferPitch = pitch / sizeof(RainBuffer);
 	const unsigned int rainBufferOffset = ty * rainBufferPitch + tx;
 
-	const unsigned int checkOffset = 1;
-
-	const float lt = tex2D(cudaTexRef, tx - (1 * checkOffset), ty - (1 * checkOffset)).x;
-	const float lc = tex2D(cudaTexRef, tx - (1 * checkOffset), ty + (0 * checkOffset)).x;
-	const float lb = tex2D(cudaTexRef, tx - (1 * checkOffset), ty + (1 * checkOffset)).x;
-	const float ct = tex2D(cudaTexRef, tx + (0 * checkOffset), ty - (1 * checkOffset)).x;
-	const float cb = tex2D(cudaTexRef, tx + (0 * checkOffset), ty + (1 * checkOffset)).x;
-	const float rt = tex2D(cudaTexRef, tx + (1 * checkOffset), ty - (1 * checkOffset)).x;
-	const float rc = tex2D(cudaTexRef, tx + (1 * checkOffset), ty + (0 * checkOffset)).x;
-	const float rb = tex2D(cudaTexRef, tx + (1 * checkOffset), ty + (1 * checkOffset)).x;
+	const float lt = tex2D(cudaTexRef, tx - (1 * gradientCheckDistance), ty - (1 * gradientCheckDistance)).x;
+	const float lc = tex2D(cudaTexRef, tx - (1 * gradientCheckDistance), ty + (0 * gradientCheckDistance)).x;
+	const float lb = tex2D(cudaTexRef, tx - (1 * gradientCheckDistance), ty + (1 * gradientCheckDistance)).x;
+	const float ct = tex2D(cudaTexRef, tx + (0 * gradientCheckDistance), ty - (1 * gradientCheckDistance)).x;
+	const float cb = tex2D(cudaTexRef, tx + (0 * gradientCheckDistance), ty + (1 * gradientCheckDistance)).x;
+	const float rt = tex2D(cudaTexRef, tx + (1 * gradientCheckDistance), ty - (1 * gradientCheckDistance)).x;
+	const float rc = tex2D(cudaTexRef, tx + (1 * gradientCheckDistance), ty + (0 * gradientCheckDistance)).x;
+	const float rb = tex2D(cudaTexRef, tx + (1 * gradientCheckDistance), ty + (1 * gradientCheckDistance)).x;
 
 	int direction = 0;
 
@@ -141,16 +159,45 @@ __global__ void calculateGradients(const unsigned int pboWidth, const unsigned i
 	if(rb < tex.x) { direction = 8; tex.x = rb; }
 
 	if(direction == 1) { rainBuffer[rainBufferOffset].directionForce = make_int2(-1, -1); }
-	if(direction == 2) { rainBuffer[rainBufferOffset].directionForce = make_int2(-1,  0); }
-	if(direction == 3) { rainBuffer[rainBufferOffset].directionForce = make_int2(-1,  1); }
-	if(direction == 4) { rainBuffer[rainBufferOffset].directionForce = make_int2( 0, -1); }
-	if(direction == 5) { rainBuffer[rainBufferOffset].directionForce = make_int2( 0,  1); }
-	if(direction == 6) { rainBuffer[rainBufferOffset].directionForce = make_int2( 1, -1); }
-	if(direction == 7) { rainBuffer[rainBufferOffset].directionForce = make_int2( 1,  0); }
-	if(direction == 8) { rainBuffer[rainBufferOffset].directionForce = make_int2( 1,  1); }
+	if(direction == 2) { rainBuffer[rainBufferOffset].directionForce = make_int2(-1, 0); }
+	if(direction == 3) { rainBuffer[rainBufferOffset].directionForce = make_int2(-1, 1); }
+	if(direction == 4) { rainBuffer[rainBufferOffset].directionForce = make_int2(0, -1); }
+	if(direction == 5) { rainBuffer[rainBufferOffset].directionForce = make_int2(0, 1); }
+	if(direction == 6) { rainBuffer[rainBufferOffset].directionForce = make_int2(1, -1); }
+	if(direction == 7) { rainBuffer[rainBufferOffset].directionForce = make_int2(1, 0); }
+	if(direction == 8) { rainBuffer[rainBufferOffset].directionForce = make_int2(1, 1); }
 }
 
-__global__ void moveRainDrops(const unsigned int pboWidth, const unsigned int pboHeight, RainBuffer* rainBuffer, const unsigned int pitch) {
+__global__ void setup_kernel(const unsigned int pboWidth, const unsigned int pboHeight, curandState *state, const unsigned int pitch) {
+	const unsigned int tx = blockDim.x * blockIdx.x + threadIdx.x;
+	const unsigned int ty = blockDim.y * blockIdx.y + threadIdx.y;
+
+	if(tx >= pboWidth || ty >= pboHeight) { return; }
+
+	const unsigned int stateBufferPitch = pitch / sizeof(curandState);
+	const unsigned int stateBufferOffset = ty * stateBufferPitch + tx;
+
+	curand_init(1234, stateBufferOffset, 0, &state[stateBufferOffset]);
+}
+
+__global__ void rain(const unsigned int pboWidth, const unsigned int pboHeight, RainBuffer* rainBuffer, curandState *curandState, const unsigned int pitch) {
+	const unsigned int tx = blockDim.x * blockIdx.x + threadIdx.x;
+	const unsigned int ty = blockDim.y * blockIdx.y + threadIdx.y;
+
+	if(tx >= pboWidth || ty >= pboHeight) { return; }
+
+	const unsigned int rainBufferPitch = pitch / sizeof(RainBuffer);
+	const unsigned int rainBufferOffset = ty * rainBufferPitch + tx;
+
+	const float myrandf = curand_uniform(curandState) + 0.99999;
+
+	const int myrand = (int)truncf(myrandf);
+
+	rainBuffer[rainBufferOffset].actualDropState += myrand;
+	rainBuffer[rainBufferOffset].promiseDropState += myrand;
+}
+
+template<unsigned int percentageDropPromise> __global__ void moveRainDrops(const unsigned int pboWidth, const unsigned int pboHeight, RainBuffer* rainBuffer, const unsigned int pitch) {
 	const unsigned int tx = blockDim.x * blockIdx.x + threadIdx.x;
 	const unsigned int ty = blockDim.y * blockIdx.y + threadIdx.y;
 
@@ -164,15 +211,17 @@ __global__ void moveRainDrops(const unsigned int pboWidth, const unsigned int pb
 	const unsigned int flowTo = (ty + directionForce.y) * rainBufferPitch + (tx + directionForce.x);
 
 	if(flowTo > 0 && flowTo < pboWidth * pboHeight * sizeof(RainBuffer)) {
-		rainBuffer[flowTo].promiseDropState += rainBuffer[rainBufferOffset].actualDropState * 0.01;
+		const double floatingDropPercentage = (double)(min(percentageDropPromise, 100) / 100.0);
 
-		rainBuffer[rainBufferOffset].promiseDropState -= rainBuffer[rainBufferOffset].actualDropState * 0.01;
+		rainBuffer[flowTo].promiseDropState += rainBuffer[rainBufferOffset].actualDropState * floatingDropPercentage;
+
+		rainBuffer[rainBufferOffset].promiseDropState -= rainBuffer[rainBufferOffset].actualDropState * floatingDropPercentage;
 
 		rainBuffer[rainBufferOffset].promiseDropState = max(rainBuffer[rainBufferOffset].promiseDropState, 0.0);
 	}
 }
 
-__global__ void vizualizeRainDrops(const unsigned int pboWidth, const unsigned int pboHeight, unsigned char *pbo, RainBuffer* rainBuffer, const unsigned int pitch) {
+template<bool isRedUse, bool isGreenUse, bool isBlueUse, bool isTextureVisible>__global__ void vizualizeRainDrops(const unsigned int pboWidth, const unsigned int pboHeight, unsigned char *pbo, RainBuffer* rainBuffer, const unsigned int pitch) {
 	const unsigned int tx = blockDim.x * blockIdx.x + threadIdx.x;
 	const unsigned int ty = blockDim.y * blockIdx.y + threadIdx.y;
 
@@ -181,27 +230,28 @@ __global__ void vizualizeRainDrops(const unsigned int pboWidth, const unsigned i
 	const uchar4 tex = tex2D(cudaTexRef, tx, ty);
 
 	const unsigned int texOffset = (ty * pboWidth + tx) * 4;
-	pbo[texOffset + 0] = tex.x; pbo[texOffset + 1] = tex.y; pbo[texOffset + 2] = tex.z; pbo[texOffset + 3] = tex.w;
-	//pbo[texOffset + 0] = 0; pbo[texOffset + 1] = 0; pbo[texOffset + 2] = 0; pbo[texOffset + 3] = 0;
+
+	pbo[texOffset + 0] = isTextureVisible ? tex.x : 0;
+	pbo[texOffset + 1] = isTextureVisible ? tex.y : 0;
+	pbo[texOffset + 2] = isTextureVisible ? tex.z : 0;
+	pbo[texOffset + 3] = isTextureVisible ? tex.w : 0;
 
 	const unsigned int rainBufferPitch = pitch / sizeof(RainBuffer);
 	const unsigned int rainBufferOffset = ty * rainBufferPitch + tx;
 
 	rainBuffer[rainBufferOffset].actualDropState = rainBuffer[rainBufferOffset].promiseDropState;
 
-	pbo[texOffset + 1] = min(max((int)rainBuffer[rainBufferOffset].actualDropState, pbo[texOffset + 1]), 255);
-	pbo[texOffset + 0] = min(max((int)rainBuffer[rainBufferOffset].actualDropState, pbo[texOffset + 0]), 255);
-	//if(rainBuffer[rainBufferOffset].actualDropState > 0) { pbo[texOffset + 2] = rainBuffer[rainBufferOffset].actualDropState; }
+	if(isRedUse) { pbo[texOffset + 0] = min(max((int)rainBuffer[rainBufferOffset].actualDropState, pbo[texOffset + 0]), 255); }
+	if(isGreenUse) { pbo[texOffset + 1] = min(max((int)rainBuffer[rainBufferOffset].actualDropState, pbo[texOffset + 1]), 255); }
+	if(isBlueUse) { pbo[texOffset + 2] = min(max((int)rainBuffer[rainBufferOffset].actualDropState, pbo[texOffset + 2]), 255); }
 }
 
-int main(int argc, char *argv[])
-{
+int main(int argc, char *argv[]) {
 	initializeCUDA(deviceProp);
 
 	initGL(argc, argv);
 
-	loadTexture("heightmap.png");
-	//loadTexture("gradient.gif");
+	loadTexture(BACKGROUND_TEX_PATH.c_str());
 
 	preparePBO();
 
@@ -217,11 +267,18 @@ int main(int argc, char *argv[])
 }
 
 void rain() {
-	checkCudaErrors(cudaMemcpy2D(hRainBufferDevPtr, imageHeight * sizeof(RainBuffer), dRainBufferDevPtr, pitch, imageHeight * sizeof(RainBuffer), imageWidth, cudaMemcpyDeviceToHost));
-
-	generateRandomDropsPosition(hRainBufferDevPtr, NUM_OF_RAIN_DROPS, imageWidth, imageHeight, 1);
-
-	checkCudaErrors(cudaMemcpy2D(dRainBufferDevPtr, pitch, hRainBufferDevPtr, imageHeight * sizeof(RainBuffer), imageHeight * sizeof(RainBuffer), imageWidth, cudaMemcpyHostToDevice));
+	switch(generateRainOn) {
+		case GenerateRainOn::CPU: {
+			checkCudaErrors(cudaMemcpy2D(hRainBufferDevPtr, imageHeight * sizeof(RainBuffer), dRainBufferDevPtr, pitch, imageHeight * sizeof(RainBuffer), imageWidth, cudaMemcpyDeviceToHost));
+			generateRandomDropsPosition(hRainBufferDevPtr, NUM_OF_RAIN_DROPS, imageWidth, imageHeight);
+			checkCudaErrors(cudaMemcpy2D(dRainBufferDevPtr, pitch, hRainBufferDevPtr, imageHeight * sizeof(RainBuffer), imageHeight * sizeof(RainBuffer), imageWidth, cudaMemcpyHostToDevice));
+		}
+		break;
+		case GenerateRainOn::GPU: {
+			rain << <ks.dimGrid, ks.dimBlock >> > (imageWidth, imageHeight, dRainBufferDevPtr, d_state, pitch);
+		}
+		break;
+	}
 }
 
 void initRainBuffer() {
@@ -229,11 +286,20 @@ void initRainBuffer() {
 }
 
 void assignRainBuffer() {
-	checkCudaErrors(cudaMallocPitch((void**)&dRainBufferDevPtr, &pitch, imageHeight * sizeof(RainBuffer), imageWidth));
-	checkCudaErrors(cudaMemcpy2D(dRainBufferDevPtr, pitch, hRainBufferDevPtr, imageHeight * sizeof(RainBuffer), imageHeight * sizeof(RainBuffer), imageWidth, cudaMemcpyHostToDevice));
+	switch(generateRainOn) {
+		case GenerateRainOn::GPU: {
+			//checkCudaErrors(cudaMalloc(&d_state, sizeof(curandState)));
+			checkCudaErrors(cudaMallocPitch((void**)&d_state, &pitch, imageHeight * sizeof(curandState), imageWidth));
+		}
+		case GenerateRainOn::CPU: {
+			checkCudaErrors(cudaMallocPitch((void**)&dRainBufferDevPtr, &pitch, imageHeight * sizeof(RainBuffer), imageWidth));
+			checkCudaErrors(cudaMemcpy2D(dRainBufferDevPtr, pitch, hRainBufferDevPtr, imageHeight * sizeof(RainBuffer), imageHeight * sizeof(RainBuffer), imageWidth, cudaMemcpyHostToDevice));
+		}
+		break;		
+	}
 }
 
-void generateRandomDropsPosition(RainBuffer* rainBuffer, const unsigned int numOfDrops, const unsigned int width, const unsigned int height, const unsigned int depth) {
+void generateRandomDropsPosition(RainBuffer* rainBuffer, const unsigned int numOfDrops, const unsigned int width, const unsigned int height) {
 	std::uniform_int_distribution<int> dis_x(0, width);
 	std::uniform_int_distribution<int> dis_y(0, height);
 
@@ -245,8 +311,7 @@ void generateRandomDropsPosition(RainBuffer* rainBuffer, const unsigned int numO
 	}
 }
 
-void cudaWorker()
-{
+void cudaWorker() {
 	cudaArray* array;
 
 	//TODO 3: Map cudaTexResource
@@ -264,6 +329,7 @@ void cudaWorker()
 
 	unsigned char *pboData;
 	size_t pboSize;
+
 	//TODO 7: Map cudaPBOResource
 	cudaGraphicsMapResources(1, &cudaPBOResource, 0);
 
@@ -276,18 +342,23 @@ void cudaWorker()
 	ks.dimBlock = dim3(BLOCK_DIM, BLOCK_DIM, 1);
 	ks.dimGrid = dim3((imageWidth + BLOCK_DIM - 1) / BLOCK_DIM, (imageHeight + BLOCK_DIM - 1) / BLOCK_DIM, 1);
 
+	//Calling kernels
+	if(!isGradientCalculated) {
+		if(generateRainOn == GenerateRainOn::GPU)
+			setup_kernel << <1, 1 >> > (imageWidth, imageHeight, d_state, pitch);
+
+		calculateGradients<GRADIENT_CHECK_DISTANCE> << <ks.dimGrid, ks.dimBlock >> > (imageWidth, imageHeight, pboData, dRainBufferDevPtr, pitch);
+
+		isGradientCalculated = true;
+
+		printf("Rain prepared!\n");
+	}
+
 	// Rain in interval
 	if(updateIteration % RAIN_INTERVAL == 0) { rain(); }
 
-	//Calling kernels
-	if(!isGradientCalculated) {
-		calculateGradients << <ks.dimGrid, ks.dimBlock >> > (imageWidth, imageHeight, pboData, dRainBufferDevPtr, pitch);
-
-		isGradientCalculated = true;
-	}
-
-	moveRainDrops << <ks.dimGrid, ks.dimBlock >> > (imageWidth, imageHeight, dRainBufferDevPtr, pitch);
-	vizualizeRainDrops << <ks.dimGrid, ks.dimBlock >> > (imageWidth, imageHeight, pboData, dRainBufferDevPtr, pitch);
+	moveRainDrops<DROP_PERCENTAGE_MOVEMENT_AVAILABILITY> << <ks.dimGrid, ks.dimBlock >> > (imageWidth, imageHeight, dRainBufferDevPtr, pitch);
+	vizualizeRainDrops<USE_RED, USE_GREEN, USE_BLUE, USE_BACKGROUND_TEX> << <ks.dimGrid, ks.dimBlock >> > (imageWidth, imageHeight, pboData, dRainBufferDevPtr, pitch);
 
 	//Following code release mapped resources, unbinds texture and ensures that PBO data will be coppied into OpenGL texture. Do not modify following code!
 	cudaUnbindTexture(&cudaTexRef);
@@ -303,8 +374,7 @@ void cudaWorker()
 
 #pragma region OpenGL Routines - DO NOT MODIFY THIS SECTION !!!
 
-void loadTexture(const char* imageFileName)
-{
+void loadTexture(const char* imageFileName) {
 	FreeImage_Initialise();
 	FIBITMAP *tmp = ImageManager::GenericLoader(imageFileName, 0);
 
@@ -330,15 +400,13 @@ void loadTexture(const char* imageFileName)
 	FreeImage_Unload(tmp);
 }
 
-void preparePBO()
-{
+void preparePBO() {
 	glGenBuffers(1, &pboID);
 	glBindBuffer(GL_PIXEL_UNPACK_BUFFER, pboID);												// Make this the current UNPACK buffer (OpenGL is state-based)
 	glBufferData(GL_PIXEL_UNPACK_BUFFER, imageWidth * imageHeight * 4, NULL, GL_DYNAMIC_COPY);	// Allocate data for the buffer. 4-channel 8-bit image
 }
 
-void my_display()
-{
+void my_display() {
 	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
 	glEnable(GL_TEXTURE_2D);
@@ -361,8 +429,7 @@ void my_display()
 	glutSwapBuffers();
 }
 
-void my_resize(GLsizei w, GLsizei h)
-{
+void my_resize(GLsizei w, GLsizei h) {
 	viewportWidth = w;
 	viewportHeight = h;
 
@@ -379,19 +446,17 @@ void my_resize(GLsizei w, GLsizei h)
 	glutPostRedisplay();
 }
 
-void my_idle()
-{
+void my_idle() {
 	cudaWorker();
 	glutPostRedisplay();
 }
 
-void initGL(int argc, char **argv)
-{
+void initGL(int argc, char **argv) {
 	glutInit(&argc, argv);
 	glutInitDisplayMode(GLUT_DOUBLE | GLUT_RGBA);
 	glutInitWindowSize(viewportWidth, viewportHeight);
 	glutInitWindowPosition(0, 0);
-	glutCreateWindow(":-)");
+	glutCreateWindow("Rain :-)");
 
 	glutDisplayFunc(my_display);
 	glutReshapeFunc(my_resize);
@@ -408,8 +473,7 @@ void initGL(int argc, char **argv)
 	glFlush();
 }
 
-void releaseOpenGL()
-{
+void releaseOpenGL() {
 	if(textureID > 0)
 		glDeleteTextures(1, &textureID);
 	if(pboID > 0)
@@ -420,8 +484,7 @@ void releaseOpenGL()
 
 #pragma region CUDA Routines
 
-void initCUDAtex()
-{
+void initCUDAtex() {
 	cudaGLSetGLDevice(0);
 	checkError();
 
@@ -440,8 +503,7 @@ void initCUDAtex()
 	checkError();
 }
 
-void releaseCUDA()
-{
+void releaseCUDA() {
 	cudaGraphicsUnregisterResource(cudaPBOResource);
 	cudaGraphicsUnregisterResource(cudaTexResource);
 }
@@ -453,8 +515,7 @@ void releaseApplication() {
 	delete[] dRainBufferDevPtr;
 }
 
-void releaseResources()
-{
+void releaseResources() {
 	releaseCUDA();
 	releaseOpenGL();
 	releaseApplication();
